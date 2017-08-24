@@ -22,6 +22,7 @@ struct users: public sqlb::table {
 };
 
 int main() {
+  auto i = integer<int>{42};
   auto q =
     select(where((eq("id", 42) or eq("name", "hello world")) and eq("age", 84))).build<users>();
   std::cout << q << std::endl;

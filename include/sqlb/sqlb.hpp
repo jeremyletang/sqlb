@@ -36,6 +36,47 @@ namespace sqlb {
       : table_name(table_name) {}
   };
 
+  namespace {
+    struct scalar_type {};
+  }
+
+  template <typename T,
+            typename = std::enable_if_t<
+              std::is_integral<T>::value>>
+  struct integer : public scalar_type {
+    T t;
+
+    integer() = delete;
+    integer(T t): t(t) {}
+  };
+
+  struct text : public scalar_type {
+    std::string t;
+
+    text() = delete;
+    text(const std::string& t) : t(t) {};
+    text(const char* t) : t(std::string{t}) {};
+  };
+
+  template <typename T>
+  struct is_scalar {
+    constexpr static bool value =
+      std::is_convertible<T, integer<T>>::value ||
+      std::is_convertible<T, text>::value;
+  };
+
+  template <typename T,
+            typename = std::enable_if_t<std::is_integral<T>::value>>
+  auto make_scalar(T t) -> integer<T> {
+    return integer<T>{t};
+  }
+
+  template <typename T,
+            typename = std::enable_if_t<std::is_convertible<T, text>::value>>
+  auto make_scalar(T t) -> text {
+    return text{t};
+  }
+
   struct table {
     virtual std::string table_name() const = 0;
   };
@@ -54,12 +95,12 @@ namespace sqlb {
     virtual std::string build(const table_metas& m) const = 0;
   };
 
-  void open_parent(std::ostringstream& os) {
-    os << "(";
+  std::string open_parent() {
+    return std::string{"("};
   }
 
-  void close_parent(std::ostringstream& os) {
-    os << ")";
+  std::string close_parent() {
+    return std::string{")"};
   }
 
   template <typename L, typename R>
@@ -76,13 +117,9 @@ namespace sqlb {
     }
 
     std::string build(const table_metas& m) const {
-      auto s = std::ostringstream{};
-      open_parent(s);
-      s << left.build(m);
-      s << " OR ";
-      s << right.build(m);
-      close_parent(s);
-      return s.str();
+      auto ss = std::ostringstream{};
+      ss << open_parent() << left.build(m) << " OR " << right.build(m) << close_parent();
+      return ss.str();
     }
   };
 
@@ -100,13 +137,9 @@ namespace sqlb {
     }
 
     std::string build(const table_metas& m) const {
-      auto s = std::ostringstream{};
-      open_parent(s);
-      s << left.build(m);
-      s << " AND ";
-      s << right.build(m);
-      close_parent(s);
-      return s.str();
+      auto ss = std::ostringstream{};
+      ss << open_parent() << left.build(m) << " AND " << right.build(m) << close_parent();
+      return ss.str();
     }
   };
 
@@ -121,13 +154,9 @@ namespace sqlb {
     }
 
     virtual std::string build(const table_metas& m) const override {
-      auto s = std::ostringstream{};
-      open_parent(s);
-      s << m.table_name << ".";
-      s << fmt;
-      s << " = '?'";
-      close_parent(s);
-      return s.str();
+      auto ss = std::ostringstream{};
+      ss << open_parent() << m.table_name << "." << fmt << " = '?'" << close_parent();
+      return ss.str();
     }
 
   private:
@@ -145,11 +174,11 @@ namespace sqlb {
       : expr(expr) {}
 
     virtual std::string build(const table_metas& m) const {
-      auto s = std::ostringstream{};
-      s << " WHERE ";
-      s << expr.build(m);
-      return s.str();
+      auto ss = std::ostringstream{};
+      ss << " WHERE " << expr.build(m);
+      return ss.str();
     }
+
   };
 
 
@@ -180,19 +209,20 @@ namespace sqlb {
         _select_expr = metas.table_name+".*";
       }
 
-      auto s = std::stringstream{};
-      s << "SELECT " << _select_expr << " FROM " << metas.table_name;
-      for_each(this->clauses, [&s, &metas](auto t){
-          s << t.build(metas);
+      auto ss = std::stringstream{};
+      ss << open_parent() << "SELECT " << _select_expr << " FROM " << metas.table_name;
+      for_each(this->clauses, [&ss, &metas](auto t){
+          ss << t.build(metas);
       });
-      s << ";";
-      return s.str();
+      ss << close_parent();
+      return ss.str();
     }
   };
 
-  template <typename T>
-  auto eq(const std::string& fmt, T p) -> eq_expr<T> {
-    return eq_expr<T>{fmt, p};
+  template <typename T,
+            typename = std::enable_if_t<std::is_scalar<T>::value>>
+  auto eq(const std::string& fmt, T p) -> eq_expr<decltype(make_scalar(p))> {
+    return eq_expr<decltype(make_scalar(p))>{fmt, make_scalar(p)};
   }
 
   template <typename L,
