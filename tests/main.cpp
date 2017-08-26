@@ -6,6 +6,7 @@
 // except according to those terms.
 
 #include <iostream>
+#include <list>
 #include <memory>
 #include <string>
 
@@ -22,9 +23,17 @@ struct users: public sqlb::table {
 };
 
 int main() {
-  auto i = integer<int>{42};
   auto q =
-    select(where((eq("id", 42) or eq("name", "hello world")) and eq("age", 84))).build<users>();
+    select(
+           where(
+                 (eq("id", 42) or eq("name",  "hello world")) and
+                 eq("age", 84) or
+                 eq("thug", 84.42) and
+                 neq("id", "hello") and
+                 between("age", 42, 54) and
+                 in("name", std::list<std::string>{"a", "b"}) and
+                 in("is_lol", std::list<bool>{true, false}))
+                 ).debug<users>();
   std::cout << q << std::endl;
   return 0;
 }

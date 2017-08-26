@@ -15,18 +15,6 @@
 
 namespace sqlb {
 
-  enum class op_kind {
-    or_,
-    and_,
-    eq
-  };
-
-  enum class stmt_kind {
-    select,
-    update,
-    delete_
-  };
-
   struct table_metas {
     std::string table_name;
 
@@ -50,6 +38,20 @@ namespace sqlb {
     integer(T t): t(t) {}
   };
 
+  template <typename T,
+            typename = std::enable_if_t<
+              std::is_floating_point<T>::value>>
+  struct real : public scalar_type {
+    T t;
+
+    real() = delete;
+    real(T t): t(t) {}
+  };
+
+  struct null : public scalar_type {
+    null() = default;
+  };
+
   struct text : public scalar_type {
     std::string t;
 
@@ -59,11 +61,20 @@ namespace sqlb {
   };
 
   template <typename T>
-  struct is_scalar {
-    constexpr static bool value =
-      std::is_convertible<T, integer<T>>::value ||
-      std::is_convertible<T, text>::value;
-  };
+  struct is_string : std::false_type {};
+
+  template <>
+  struct is_string<const char *> : std::true_type {};
+  template <>
+  struct is_string<char *> : std::true_type {};
+  template <>
+  struct is_string<std::string> : std::true_type {};
+
+  template< class T >
+  struct is_scalar : std::integral_constant<bool,
+                                            is_string<T>::value ||
+                                            std::is_arithmetic<T>::value     ||
+                                            std::is_null_pointer<T>::value> {};
 
   template <typename T,
             typename = std::enable_if_t<std::is_integral<T>::value>>
@@ -72,9 +83,22 @@ namespace sqlb {
   }
 
   template <typename T,
+            typename = std::enable_if_t<std::is_floating_point<T>::value>>
+  auto make_scalar(T t) -> real<T> {
+    return real<T>{t};
+  }
+
+  template <typename T,
             typename = std::enable_if_t<std::is_convertible<T, text>::value>>
   auto make_scalar(T t) -> text {
     return text{t};
+  }
+
+  template <typename T,
+            typename = std::enable_if_t<std::is_null_pointer<T>::value>>
+  auto make_scalar(T t) -> null {
+    (void)t;
+    return null{};
   }
 
   struct table {
@@ -83,23 +107,24 @@ namespace sqlb {
 
   struct clause {
     virtual std::string build(const table_metas& m) const = 0;
+    virtual std::stringstream& debug(const table_metas& m, std::stringstream& ss) const = 0;
   };
 
   struct expr {
-    virtual enum op_kind get_op_kind() const = 0;
     virtual std::string build(const table_metas& m) const = 0;
+    virtual std::stringstream& debug(const table_metas& m, std::stringstream& ss) const = 0;
   };
 
   struct stmt {
-    virtual stmt_kind get_stmt_kind() const = 0;
     virtual std::string build(const table_metas& m) const = 0;
+    virtual std::stringstream& debug(const table_metas& m, std::stringstream& ss) const = 0;
   };
 
-  std::string open_parent() {
+  inline std::string open_parent() {
     return std::string{"("};
   }
 
-  std::string close_parent() {
+  inline std::string close_parent() {
     return std::string{")"};
   }
 
@@ -112,56 +137,161 @@ namespace sqlb {
       : left(left),
         right(right) {}
 
-    enum op_kind get_op_kind() const {
-      return op_kind::or_;
-    }
-
-    std::string build(const table_metas& m) const {
+    virtual std::string build(const table_metas& m) const override {
       auto ss = std::ostringstream{};
       ss << open_parent() << left.build(m) << " OR " << right.build(m) << close_parent();
       return ss.str();
     }
+
+    virtual std::stringstream& debug(const table_metas& m, std::stringstream& ss) const override {
+      ss << open_parent();
+      left.debug(m, ss) << " OR ";
+      right.debug(m, ss) << close_parent();
+      return ss;
+    }
+
   };
 
   template <typename L, typename R>
   struct and_expr: public expr {
-    L left;
-    R right;
 
     and_expr(L left, R right)
       : left(left),
         right(right) {}
 
-    enum op_kind get_op_kind() const {
-      return op_kind::and_;
-    }
-
-    std::string build(const table_metas& m) const {
+    virtual std::string build(const table_metas& m) const override {
       auto ss = std::ostringstream{};
       ss << open_parent() << left.build(m) << " AND " << right.build(m) << close_parent();
       return ss.str();
     }
+
+    virtual std::stringstream& debug(const table_metas& m, std::stringstream& ss) const override {
+      ss << open_parent();
+      left.debug(m, ss) << " AND ";
+      right.debug(m, ss) << close_parent();
+      return ss;
+    }
+
+  private:
+    L left;
+    R right;
+
   };
 
   template <typename T>
   struct eq_expr: public expr {
-    eq_expr(const std::string& fmt, T t)
-      : fmt(fmt),
-        t(t) {}
 
-    virtual enum op_kind get_op_kind() const override {
-      return op_kind::eq;
-    }
+    eq_expr(const std::string& field, T t)
+      : field(field),
+        t(t) {}
 
     virtual std::string build(const table_metas& m) const override {
       auto ss = std::ostringstream{};
-      ss << open_parent() << m.table_name << "." << fmt << " = '?'" << close_parent();
+      ss << open_parent() << m.table_name << "." << field << " " << sym << " '?'" << close_parent();
       return ss.str();
     }
 
+    virtual std::stringstream& debug(const table_metas& m, std::stringstream& ss) const override {
+      ss << open_parent() << m.table_name << "." << field << " " << sym << " '" << t << "'" << close_parent();
+      return ss;
+    }
+
   private:
-    std::string fmt;
+    const std::string sym = "!=";
+    std::string field;
     T t;
+
+  };
+
+  template <typename T>
+  struct neq_expr: public expr {
+
+    neq_expr(const std::string& field, T t)
+      : field(field),
+        t(t) {}
+
+    virtual std::string build(const table_metas& m) const override {
+      auto ss = std::ostringstream{};
+      ss << open_parent() << m.table_name << "." << field << " " << sym << " '?'" << close_parent();
+      return ss.str();
+    }
+
+    virtual std::stringstream& debug(const table_metas& m, std::stringstream& ss) const override {
+      ss << open_parent() << m.table_name << "." << field << " " << sym <<  " '" << t << "'" << close_parent();
+      return ss;
+    }
+
+  private:
+    const std::string sym = "!=";
+    std::string field;
+    T t;
+
+  };
+
+
+  template <typename T>
+  struct between_expr: public expr {
+
+    between_expr(const std::string& field, T t, T u)
+      : field(field),
+        t(t),
+        u(u) {}
+
+    virtual std::string build(const table_metas& m) const override {
+      auto ss = std::ostringstream{};
+      ss << open_parent() << m.table_name << "." << field <<
+        " BETWEEN '?' AND '?'" << close_parent();
+      return ss.str();
+    }
+
+    virtual std::stringstream& debug(const table_metas& m, std::stringstream& ss) const override {
+      ss << open_parent() << m.table_name << "." << field <<
+        " BETWEEN '" << t << "' AND '" << u << "'" << close_parent();
+      return ss;
+    }
+
+  private:
+    const std::string sym = "!=";
+    std::string field;
+    T t;
+    T u;
+
+  };
+
+  template <typename T>
+  struct in_expr: public expr {
+    in_expr(const std::string& field, const std::vector<T>& t)
+      : field(field),
+        t(t) {}
+
+    virtual std::string build(const table_metas& m) const override {
+      auto ss = std::ostringstream{};
+      ss << open_parent() << m.table_name << "." << field << " IN (";
+      auto i = t.size()-1;
+      while (i > 0) {
+        ss << "'?'";
+        i -= 1;
+        if (i > 0) { ss << ", "; }
+      }
+      ss << ")" << close_parent();
+      return ss.str();
+    }
+
+    virtual std::stringstream& debug(const table_metas& m, std::stringstream& ss) const override {
+      ss << open_parent() << m.table_name << "." << field << " IN (";
+      auto i = t.size()-1;
+      for (const auto& v : t) {
+        ss << "'" << v << "'";
+        if (i > 0) { ss << ", "; i -= 1; }
+      }
+      ss << ")" << close_parent();
+      return ss;
+    }
+
+  private:
+    const std::string sym = "!=";
+    std::string field;
+    std::vector<T> t;
 
   };
 
@@ -173,12 +303,17 @@ namespace sqlb {
     where_clause(E expr)
       : expr(expr) {}
 
-    virtual std::string build(const table_metas& m) const {
+    virtual std::string build(const table_metas& m) const override {
       auto ss = std::ostringstream{};
       ss << " WHERE " << expr.build(m);
       return ss.str();
     }
 
+    virtual std::stringstream& debug(const table_metas& m, std::stringstream& ss) const override {
+      ss << " WHERE ";
+      expr.debug(m, ss);
+      return ss;
+    }
   };
 
 
@@ -217,12 +352,54 @@ namespace sqlb {
       ss << close_parent();
       return ss.str();
     }
+
+    template<typename T>
+    std::string debug() const {
+      auto metas = table_metas{T{}.table_name()};
+      auto _select_expr = this->select_expr;
+      if (_select_expr == "*") {
+        _select_expr = metas.table_name+".*";
+      }
+
+      auto ss = std::stringstream{};
+      ss << open_parent() << "SELECT " << _select_expr << " FROM " << metas.table_name;
+      for_each(this->clauses, [&ss, &metas](auto t){
+         t.debug(metas, ss);
+      });
+      ss << close_parent();
+      return ss.str();
+    }
   };
 
   template <typename T,
-            typename = std::enable_if_t<std::is_scalar<T>::value>>
-  auto eq(const std::string& fmt, T p) -> eq_expr<decltype(make_scalar(p))> {
-    return eq_expr<decltype(make_scalar(p))>{fmt, make_scalar(p)};
+            typename = std::enable_if_t<is_scalar<T>::value>>
+  auto eq(const std::string& field, T p) -> eq_expr<decltype(make_scalar(p))> {
+    return eq_expr<decltype(make_scalar(p))>{field, make_scalar(p)};
+  }
+
+  template <typename T,
+            typename = std::enable_if_t<is_scalar<T>::value>>
+  auto neq(const std::string& field, T p) -> neq_expr<decltype(make_scalar(p))> {
+    return neq_expr<decltype(make_scalar(p))>{field, make_scalar(p)};
+  }
+
+  template <typename T,
+            typename = std::enable_if_t<is_scalar<T>::value>>
+  auto between(const std::string& field, T p, T q) -> between_expr<decltype(make_scalar(p))> {
+    return between_expr<decltype(make_scalar(p))>{field, make_scalar(p), make_scalar(q)};
+  }
+
+  template <template<typename, typename> class C,
+            typename T,
+            typename Allocator,
+            typename = std::enable_if_t<is_scalar<T>::value>>
+  auto in(const std::string& field, const C<T, Allocator>& p) {
+  // -> in_expr<decltype(make_scalar(std::declval<T>()))> {
+    std::vector<decltype(make_scalar(std::declval<T>()))> v;
+    for (const auto& _v : p) {
+      v.push_back(make_scalar(_v));
+    }
+    return in_expr<decltype(make_scalar(std::declval<T>()))>{field, v};
   }
 
   template <typename L,
@@ -274,4 +451,32 @@ namespace sqlb {
   auto operator&&(L left, R right) -> and_expr<L, R> {
     return and_(left, right);
   }
+
+  template <typename CharT, typename Traits, typename T>
+  std::basic_ostream<CharT, Traits>&
+  operator<<(std::basic_ostream<CharT, Traits>&os, const real<T> r) {
+    os << r.t;
+    return os;
+  }
+
+  template <typename CharT, typename Traits, typename T>
+  std::basic_ostream<CharT, Traits>&
+  operator<<(std::basic_ostream<CharT, Traits> &os, const integer<T> i) {
+    os << i.t;
+    return os;
+  }
+
+  template <typename CharT, typename Traits>
+  std::basic_ostream<CharT, Traits>&
+  operator<<(std::basic_ostream<CharT, Traits> &os, const text t) {
+    os << t.t;
+    return os;
+  }
+
+  template <typename CharT, typename Traits>
+  std::basic_ostream<CharT, Traits>& operator<<(std::basic_ostream<CharT, Traits> &os, const null) {
+    os << "NULL";
+    return os;
+  }
+
 }
